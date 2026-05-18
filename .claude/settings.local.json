@@ -9,7 +9,12 @@
       "Bash(./run.sh benchmark.py --n-stocks 10 --epochs 5)",
       "Bash(./run.sh -c ' *)",
       "Bash(awk '{print $2}')",
-      "Bash(xargs -r kill)"
+      "Bash(xargs -r kill)",
+      "Bash(./run.sh -c \"import torch; print\\('CUDA:', torch.cuda.is_available\\(\\), torch.cuda.get_device_name\\(0\\) if torch.cuda.is_available\\(\\) else 'N/A'\\)\")",
+      "Bash(./run.sh benchmark.py --n-stocks 3000)",
+      "Bash(tee /tmp/benchmark_3000.log)",
+      "Bash(./run.sh benchmark.py --n-stocks 500 --epochs 50)",
+      "Bash(tee /tmp/benchmark_500.log)"
     ]
   }
 }

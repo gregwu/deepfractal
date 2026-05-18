@@ -122,7 +122,7 @@ def main():
     parser.add_argument("--hidden",   type=int, default=64)
     parser.add_argument("--lr",       type=float, default=1e-4)
     parser.add_argument("--windows",  default="16,32,64")
-    parser.add_argument("--device",   default="cpu")
+    parser.add_argument("--device",   default="cuda" if __import__("torch").cuda.is_available() else "cpu")
     parser.add_argument("--seed",     type=int, default=42)
     parser.add_argument("--start",    default="2015-01-01")
     parser.add_argument("--end",      default="2024-12-31")

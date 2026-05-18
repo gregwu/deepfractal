@@ -168,7 +168,7 @@ def main():
     parser.add_argument("--feature-dim",     type=int,   default=64)
     parser.add_argument("--no-fractal-loss", action="store_true", help="Ablation: MSE only")
     parser.add_argument("--no-vae",          action="store_true")
-    parser.add_argument("--device",          default="cpu")
+    parser.add_argument("--device",          default="cuda" if __import__("torch").cuda.is_available() else "cpu")
     parser.add_argument("--data-start",      default="2020-01-01", help="Data start date (YYYY-MM-DD)")
     parser.add_argument("--data-end",        default="2024-12-31", help="Data end date (YYYY-MM-DD)")
     args = parser.parse_args()
