@@ -51,9 +51,9 @@ def get_db_connection():
         conn = psycopg2.connect(
             host=os.getenv("DB_HOST", "localhost"),
             port=os.getenv("DB_PORT", "5432"),
-            database=os.getenv("DB_NAME", "gangwu"),
-            user=os.getenv("DB_USER", "gangwu"),
-            password=os.getenv("DB_PASSWORD", "gangwu"),
+            database=os.getenv("DB_NAME", "dbname"),
+            user=os.getenv("DB_USER", "dbuser"),
+            password=os.getenv("DB_PASSWORD", "dbpassword"),
         )
         return conn
     except psycopg2.Error as e:
