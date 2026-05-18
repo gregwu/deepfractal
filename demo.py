@@ -119,30 +119,35 @@ def get_sp500_tickers(conn, n_tickers: int = 500) -> list[str]:
     return tickers
 
 
-def _fetch_db(conn, ticker: str, start: str = "2020-01-01", end: str = "2024-12-31") -> np.ndarray | None:
+def _fetch_ohlcv(conn, ticker: str, start: str, end: str):
+    """Returns (close, ohlcv_5col) or (None, None). ohlcv cols: open,high,low,close,log_vol."""
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT close_price FROM stock_data
+            SELECT open_price, high_price, low_price, close_price, volume
+            FROM stock_data
             WHERE ticker = %s AND date >= %s AND date <= %s
             ORDER BY date ASC
         """, (ticker, start, end))
         rows = cursor.fetchall()
         cursor.close()
         if not rows:
-            return None
-        close = np.array([r[0] for r in rows], dtype=float)
-        # forward-fill any NaNs
-        mask = np.isnan(close)
-        for i in range(1, len(close)):
-            if mask[i]:
-                close[i] = close[i - 1]
-        close = close[~np.isnan(close)]
+            return None, None
+        mat = np.array(rows, dtype=float)
+        for i in range(1, len(mat)):
+            if np.isnan(mat[i]).any():
+                mat[i] = mat[i - 1]
+        mat = mat[~np.isnan(mat).any(axis=1)]
+        if len(mat) < 100:
+            return None, None
+        close = mat[:, 3]
+        ohlcv = mat.copy()
+        ohlcv[:, 4] = np.log1p(ohlcv[:, 4])
         print(f"  Loaded {len(close)} trading days from stock_db ({ticker})")
-        return close if len(close) >= 100 else None
+        return close, ohlcv
     except Exception as e:
         print(f"  DB fetch failed for {ticker}: {e}")
-        return None
+        return None, None
 
 
 def _synthetic_data(n: int = 2000, seed: int = 42) -> np.ndarray:
@@ -179,6 +184,11 @@ def main():
     # Connect to database
     db_conn = get_db_connection()
 
+    # Load SPY as market reference
+    spy_close, _ = _fetch_ohlcv(db_conn, "SPY.US", args.data_start, args.data_end)
+    if spy_close is None:
+        print("  WARNING: SPY.US not found — SPY ratio feature disabled")
+
     # Get list of tickers to train on
     if args.sp500 > 0:
         tickers = get_sp500_tickers(db_conn, n_tickers=min(args.sp500, 500))
@@ -208,23 +218,30 @@ def main():
 
         # 1. Load data
         print(f"\n[1/5] Loading price data...")
-        close = _fetch_db(db_conn, ticker, start=args.data_start, end=args.data_end)
+        close, ohlcv = _fetch_ohlcv(db_conn, ticker, start=args.data_start, end=args.data_end)
         if close is None:
             print(f"  Failed to load data for {ticker}")
             failed_tickers.append(ticker)
             continue
-        
+
         if len(close) < 100:
             print(f"  Insufficient data for {ticker} ({len(close)} days < 100)")
             failed_tickers.append(ticker)
             continue
 
+        # Align SPY to same length
+        spy = spy_close[-len(close):] if spy_close is not None else None
+        if spy is not None and len(spy) < len(close):
+            spy = np.pad(spy, (len(close) - len(spy), 0), mode='edge')
+
         # 2. Extract multi-scale fractal features
-        from fractal_features import extract_multiscale_features
+        from fractal_features import extract_multiscale_features, append_ohlcv_spy
         print(f"\n[2/5] Extracting fractal features at scales {windows}...")
         try:
             t0 = time.time()
             scale_feats = extract_multiscale_features(close, windows=tuple(windows))
+            if spy is not None:
+                scale_feats = append_ohlcv_spy(scale_feats, ohlcv, spy)
             elapsed = time.time() - t0
             for w, f in scale_feats.items():
                 print(f"  window={w:3d}: {f.shape[0]} samples × {f.shape[1]} features  ({elapsed:.1f}s)")
@@ -233,30 +250,29 @@ def main():
             failed_tickers.append(ticker)
             continue
 
-        # Target: next-day closing price (shift by 1)
         min_len = min(f.shape[0] for f in scale_feats.values())
-        targets = np.array([close[-(min_len - i)] for i in range(min_len - 1, -1, -1)])
-        # Align: target[t] = close price corresponding to the end of each window
-        # We predict the price at the last day of each window
         end_indices = [len(close) - min_len + i for i in range(min_len)]
         targets = close[end_indices]
+        aligned = {w: scale_feats[w][-min_len:] for w in windows}
 
         # 3. Build dataset
         from model import build_dataset, DeepFractal, train, evaluate
         print("\n[3/5] Building train/val/test splits (60/20/20)...")
         try:
-            dataset = build_dataset(scale_feats, targets)
+            dataset = build_dataset(aligned, targets)
             print(f"  Train: {len(dataset['train'])}  Val: {len(dataset['val'])}  Test: {len(dataset['test'])}")
         except Exception as e:
             print(f"  Dataset building failed for {ticker}: {e}")
             failed_tickers.append(ticker)
             continue
 
+        fractal_dim = scale_feats[windows[0]].shape[1]  # 10 or 16
+
         # 4. Train
         print(f"\n[4/5] Training DeepFractal model...")
         try:
             model = DeepFractal(
-                fractal_dim=10,
+                fractal_dim=fractal_dim,
                 n_scales=len(windows),
                 feature_dim=args.feature_dim,
                 tucker_rank=8,

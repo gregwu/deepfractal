@@ -249,7 +249,7 @@ class FractalLoss(nn.Module):
         self.q_renyi        = q_renyi
         self.use_fractal    = use_fractal
 
-        q_vals = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0])
+        q_vals = torch.linspace(-5.0, 5.0, 11)   # match feature extraction q range
         self.register_buffer("q_vals", q_vals)
 
     def forward(

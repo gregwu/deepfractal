@@ -14,7 +14,9 @@
       "Bash(./run.sh benchmark.py --n-stocks 3000)",
       "Bash(tee /tmp/benchmark_3000.log)",
       "Bash(./run.sh benchmark.py --n-stocks 500 --epochs 50)",
-      "Bash(tee /tmp/benchmark_500.log)"
+      "Bash(tee /tmp/benchmark_500.log)",
+      "Bash(PGPASSWORD=gangwuspark psql -U gangwu -h localhost -d stock_db -c \"SELECT open_price, high_price, low_price, close_price, volume FROM stock_data WHERE ticker='SPY.US' ORDER BY date DESC LIMIT 3\")",
+      "Bash(./run.sh benchmark.py --n-stocks 3 --epochs 3)"
     ]
   }
 }

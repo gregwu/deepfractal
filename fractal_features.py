@@ -213,14 +213,21 @@ def fractal_dimension_gks(
 
 def _gfrft_transform(series: np.ndarray, theta: float = np.pi / 4) -> np.ndarray:
     """
-    Discrete approximation of generalized fractional Fourier transform (GFRFT).
-    Kernel: K_θ(t,τ) = e^{iπtτ tanθ}  (Eq. 9, paper text).
-    We use a chirp-multiplication approximation.
+    Discrete FRFT via Ozaktas chirp-multiplication algorithm.
+    K_θ(t,τ) = e^{iπtτ tanθ}  (Eq. 9).
+
+    Steps: pre-chirp × signal → FFT → post-chirp, with proper 1/sqrt(N) norm.
+    When θ=π/2 degenerates to standard DFT.
     """
     n = len(series)
     t = np.arange(n, dtype=float)
-    chirp = np.exp(1j * np.pi * t ** 2 * np.tan(theta) / n)
-    return np.fft.fft(series * chirp) * chirp
+    tan_t = np.tan(theta)
+    # pre-chirp: e^{-iπ t² tan(θ) / N}
+    pre  = np.exp(-1j * np.pi * t ** 2 * tan_t / n)
+    # post-chirp: same envelope
+    post = np.exp(-1j * np.pi * t ** 2 * tan_t / n)
+    out  = np.fft.fft(series * pre) * post
+    return out / np.sqrt(n)
 
 
 def multifractal_spectrum(
@@ -410,3 +417,41 @@ def extract_multiscale_features(
     for w in windows:
         feats[w] = extract_fractal_features(close, window=w, **kwargs)
     return feats
+
+
+def append_ohlcv_spy(
+    fractal_feats: dict[int, np.ndarray],
+    ohlcv: np.ndarray,
+    spy_close: np.ndarray,
+) -> dict[int, np.ndarray]:
+    """
+    Augment fractal feature arrays with OHLCV + SPY ratio, matching the paper's
+    use of raw market data alongside fractal features.
+
+    ohlcv     : (N, 5) array — columns [open, high, low, close, log_volume]
+                aligned to the full close price series (same length)
+    spy_close : (N,) SPY closing prices aligned to the same dates
+
+    For each window scale w, the last `rows` rows of ohlcv and spy are appended:
+      - 5 OHLCV values (Z-scored per feature over the window)
+      - 1 SPY ratio: close / spy_close  (relative market positioning)
+
+    fractal_dim grows from 10 → 16.
+    """
+    augmented = {}
+    for w, feats in fractal_feats.items():
+        n_rows = feats.shape[0]
+        # Take the last n_rows rows to align with the fractal feature window end
+        raw = ohlcv[-n_rows:].astype(np.float32)          # (n_rows, 5)
+        spy = spy_close[-n_rows:].astype(np.float32)       # (n_rows,)
+        close_col = raw[:, 3]                              # close column
+
+        # SPY ratio: stock close / SPY close
+        spy_ratio = (close_col / (spy + 1e-8)).reshape(-1, 1)  # (n_rows, 1)
+
+        # Z-score each OHLCV column (use global stats — already normalized later)
+        raw_norm = (raw - raw.mean(0)) / (raw.std(0) + 1e-8)
+
+        extra = np.concatenate([raw_norm, spy_ratio], axis=1)  # (n_rows, 6)
+        augmented[w] = np.concatenate([feats, extra], axis=1)  # (n_rows, 16)
+    return augmented

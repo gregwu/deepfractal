@@ -66,23 +66,36 @@ def _load_tickers(conn, n: int, start: str, end: str, min_days: int = 200) -> li
     return tickers
 
 
-def _load_close(conn, ticker: str, start: str, end: str) -> np.ndarray | None:
+def _ffill(arr: np.ndarray) -> np.ndarray:
+    for i in range(1, len(arr)):
+        mask = np.isnan(arr[i]) if arr.ndim == 1 else np.isnan(arr[i]).any()
+        if mask:
+            arr[i] = arr[i - 1]
+    return arr
+
+
+def _load_ohlcv(conn, ticker: str, start: str, end: str):
+    """Returns (close, ohlcv_5col) or (None, None). ohlcv cols: open,high,low,close,log_vol."""
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT close_price FROM stock_data
+        SELECT open_price, high_price, low_price, close_price, volume
+        FROM stock_data
         WHERE ticker = %s AND date >= %s AND date <= %s
         ORDER BY date ASC
     """, (ticker, start, end))
     rows = cursor.fetchall()
     cursor.close()
     if not rows:
-        return None
-    close = np.array([r[0] for r in rows], dtype=float)
-    for i in range(1, len(close)):
-        if np.isnan(close[i]):
-            close[i] = close[i - 1]
-    close = close[~np.isnan(close)]
-    return close if len(close) >= 100 else None
+        return None, None
+    mat = np.array(rows, dtype=float)
+    mat = _ffill(mat)
+    mat = mat[~np.isnan(mat).any(axis=1)]
+    if len(mat) < 100:
+        return None, None
+    close = mat[:, 3]
+    ohlcv = mat.copy()
+    ohlcv[:, 4] = np.log1p(ohlcv[:, 4])   # log volume
+    return close, ohlcv
 
 
 # ---------------------------------------------------------------------------
@@ -138,15 +151,23 @@ def main():
 
     conn = _get_conn()
     tickers = _load_tickers(conn, args.n_stocks, args.start, args.end)
-    print(f"\nSelected {len(tickers)} tickers from stock_db\n")
+    print(f"\nSelected {len(tickers)} tickers from stock_db")
+
+    # Load SPY as market reference (aligned dates fetched per-ticker below)
+    spy_close_full, _ = _load_ohlcv(conn, "SPY.US", args.start, args.end)
+    if spy_close_full is None:
+        print("  WARNING: SPY.US not found — SPY ratio feature disabled")
+    print()
 
     from baselines import (
         make_sequence_dataset,
         RNNModel, LSTMModel, GRUModel, ALSTMModel, VMDLSTMModel,
         train_baseline,
     )
-    from fractal_features import extract_multiscale_features
+    from fractal_features import extract_multiscale_features, append_ohlcv_spy
     from model import DeepFractal, build_dataset, train, evaluate
+
+    FRACTAL_DIM = 16 if spy_close_full is not None else 10  # 10 fractal + 5 OHLCV + 1 SPY ratio
 
     model_names = ["RNN", "LSTM", "GRU", "ALSTM", "VMD-LSTM", "DeepFractal"]
     all_results = {name: [] for name in model_names}
@@ -155,11 +176,16 @@ def main():
     n_done = 0
 
     for idx, ticker in enumerate(tickers):
-        close = _load_close(conn, ticker, args.start, args.end)
+        close, ohlcv = _load_ohlcv(conn, ticker, args.start, args.end)
         if close is None or len(close) < max(windows) + args.seq_len + 20:
             continue
 
-        # --- sequence dataset (baselines) ---
+        # Align SPY to same length as this ticker
+        spy = spy_close_full[-len(close):] if spy_close_full is not None else None
+        if spy is not None and len(spy) < len(close):
+            spy = np.pad(spy, (len(close) - len(spy), 0), mode='edge')
+
+        # --- sequence dataset (baselines) — use OHLCV as input (5 features) ---
         seq_ds = make_sequence_dataset(close, seq_len=args.seq_len)
 
         # --- fractal dataset (DeepFractal) ---
@@ -167,6 +193,11 @@ def main():
             scale_feats = extract_multiscale_features(close, windows=windows)
         except Exception:
             continue
+
+        # Augment with OHLCV + SPY
+        if spy is not None:
+            scale_feats = append_ohlcv_spy(scale_feats, ohlcv, spy)
+
         min_len = min(f.shape[0] for f in scale_feats.values())
         aligned = {w: scale_feats[w][-min_len:] for w in windows}
         end_idx = [len(close) - min_len + i for i in range(min_len)]
@@ -190,7 +221,7 @@ def main():
             all_results[name].append(m)
 
         t0 = time.time()
-        df_model = DeepFractal(fractal_dim=10, n_scales=len(windows),
+        df_model = DeepFractal(fractal_dim=FRACTAL_DIM, n_scales=len(windows),
                                feature_dim=64, tucker_rank=8,
                                latent_dim=16, dropout=0.3, use_vae=True)
         train(df_model, frac_ds, epochs=args.epochs, batch_size=args.batch,
