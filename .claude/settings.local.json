@@ -3,7 +3,13 @@
     "allow": [
       "Bash(chmod +x /Users/gangwu/git/deepfractal/run.sh)",
       "Bash(./run.sh demo.py --sp500 500)",
-      "Bash(wait 3728)"
+      "Bash(wait 3728)",
+      "Bash(PGPASSWORD=gangwuspark psql -U gangwu -h localhost -d stock_db -c ' *)",
+      "Bash(tee /tmp/deepfractal_sp500.log)",
+      "Bash(./run.sh benchmark.py --n-stocks 10 --epochs 5)",
+      "Bash(./run.sh -c ' *)",
+      "Bash(awk '{print $2}')",
+      "Bash(xargs -r kill)"
     ]
   }
 }

@@ -101,42 +101,47 @@ def save_results_to_db(conn, ticker: str, metrics: dict, model_params: dict):
 # S&P 500 Tickers
 # ---------------------------------------------------------------------------
 
-def get_sp500_tickers(n_tickers: int = 500) -> list[str]:
-    """Fetch S&P 500 tickers. Returns first n_tickers (default 500)."""
+def get_sp500_tickers(conn, n_tickers: int = 500) -> list[str]:
+    """Get up to n_tickers from stock_data that have sufficient history."""
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT ticker
+        FROM stock_data
+        WHERE date >= '2020-01-01'
+        GROUP BY ticker
+        HAVING COUNT(*) >= 100
+        ORDER BY COUNT(*) DESC, ticker
+        LIMIT %s
+    """, (n_tickers,))
+    tickers = [row[0] for row in cursor.fetchall()]
+    cursor.close()
+    print(f"  Found {len(tickers)} tickers with 100+ days of data in stock_db")
+    return tickers
+
+
+def _fetch_db(conn, ticker: str, start: str = "2020-01-01", end: str = "2024-12-31") -> np.ndarray | None:
     try:
-        import pandas as pd
-        # Fetch S&P 500 tickers from Wikipedia
-        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        tables = pd.read_html(url)
-        df = tables[0]
-        tickers = df['Symbol'].tolist()[:n_tickers]
-        print(f"  Fetched {len(tickers)} S&P 500 tickers from Wikipedia")
-        return tickers
-    except Exception as e:
-        print(f"  Could not fetch S&P 500 from Wikipedia: {e}")
-        print(f"  Using default list of {n_tickers} tickers")
-        # Fallback: top tickers by market cap
-        return [
-            "AAPL", "MSFT", "GOOG", "GOOGL", "AMZN", "NVDA", "TSLA", "BRK.B", "JNJ", "WMT",
-            "MA", "PG", "V", "KO", "HD", "JNJ", "MCD", "ADBE", "CRM", "NYT",
-            "BA", "CAT", "AXP", "MMM", "ABT", "CMCSA", "VZ", "T", "XOM", "CVX",
-            "PFE", "LLY", "COST", "AMD", "QCOM", "MU", "NFLX", "INTC", "IBM", "CSCO",
-        ] * ((n_tickers // 40) + 1)[:n_tickers]
-
-
-
-
-def _fetch_yfinance(ticker: str, start: str = "2020-01-01", end: str = "2024-12-31") -> np.ndarray | None:
-    try:
-        import yfinance as yf
-        hist = yf.Ticker(ticker).history(start=start, end=end)
-        if hist.empty:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT close_price FROM stock_data
+            WHERE ticker = %s AND date >= %s AND date <= %s
+            ORDER BY date ASC
+        """, (ticker, start, end))
+        rows = cursor.fetchall()
+        cursor.close()
+        if not rows:
             return None
-        close = hist["Close"].ffill().dropna().values.astype(float)
-        print(f"  Loaded {len(close)} trading days from yfinance ({ticker})")
-        return close
+        close = np.array([r[0] for r in rows], dtype=float)
+        # forward-fill any NaNs
+        mask = np.isnan(close)
+        for i in range(1, len(close)):
+            if mask[i]:
+                close[i] = close[i - 1]
+        close = close[~np.isnan(close)]
+        print(f"  Loaded {len(close)} trading days from stock_db ({ticker})")
+        return close if len(close) >= 100 else None
     except Exception as e:
-        print(f"  yfinance failed: {e}")
+        print(f"  DB fetch failed for {ticker}: {e}")
         return None
 
 
@@ -171,15 +176,15 @@ def main():
     windows = [int(w) for w in args.windows.split(",")]
     use_fractal = not args.no_fractal_loss
 
-    # Get list of tickers to train on
-    if args.sp500 > 0:
-        tickers = get_sp500_tickers(n_tickers=min(args.sp500, 500))
-        print(f"  Training on {len(tickers)} S&P 500 tickers")
-    else:
-        tickers = [args.ticker]
-
     # Connect to database
     db_conn = get_db_connection()
+
+    # Get list of tickers to train on
+    if args.sp500 > 0:
+        tickers = get_sp500_tickers(db_conn, n_tickers=min(args.sp500, 500))
+        print(f"  Training on {len(tickers)} tickers from stock_db")
+    else:
+        tickers = [args.ticker]
 
     print("=" * 60)
     print("  DeepFractal Stock Price Prediction")
@@ -203,7 +208,7 @@ def main():
 
         # 1. Load data
         print(f"\n[1/5] Loading price data...")
-        close = _fetch_yfinance(ticker, start=args.data_start, end=args.data_end)
+        close = _fetch_db(db_conn, ticker, start=args.data_start, end=args.data_end)
         if close is None:
             print(f"  Failed to load data for {ticker}")
             failed_tickers.append(ticker)
